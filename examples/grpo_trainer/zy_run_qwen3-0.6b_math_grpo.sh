@@ -15,7 +15,7 @@ set -x
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/math/train.parquet \
-    data.val_files=$HOME/data/math/test.parquet \
+    data.val_files=$HOME/data/math500/test.parquet \
     data.train_batch_size=1024 \
     data.max_prompt_length=2048 \
     data.max_response_length=8192 \
