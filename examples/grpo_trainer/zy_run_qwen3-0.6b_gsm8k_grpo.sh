@@ -15,6 +15,10 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     actor_rollout_ref.model.path=/c22940/zy/model/Qwen3-0.6B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.warmup_style=cosine \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
+    actor_rollout_ref.actor.optim.min_lr_ratio=0.1 \
+    actor_rollout_ref.actor.optim.num_cycles=0.5 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \

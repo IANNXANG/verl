@@ -34,6 +34,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
@@ -45,4 +46,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=5 \
-    trainer.total_epochs=3 $@
+    trainer.rollout_data_dir='./rollout_data/qwen3_0.6b_grpo' \
+    trainer.validation_data_dir='./validation_data/qwen3_0.6b_grpo' \
+    trainer.log_val_generations=50 \
+    trainer.total_epochs=5 $@
