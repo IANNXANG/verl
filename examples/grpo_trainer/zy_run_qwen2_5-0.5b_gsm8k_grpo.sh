@@ -46,7 +46,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=5 \
-    trainer.rollout_data_dir='./rollout_data/qwen3_0.6b_grpo' \
-    trainer.validation_data_dir='./validation_data/qwen3_0.6b_grpo' \
+    trainer.rollout_data_dir='./rollout_data/qwen2.5_0.5b_grpo' \
+    trainer.validation_data_dir='./validation_data/qwen2.5_0.5b_grpo' \
     trainer.log_val_generations=50 \
     trainer.total_epochs=5 $@
