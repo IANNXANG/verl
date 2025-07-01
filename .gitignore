@@ -127,3 +127,4 @@ outputs
 
 validation_data/
 rollout_data/
+core.*
