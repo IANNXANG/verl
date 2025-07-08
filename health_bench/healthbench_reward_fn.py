@@ -323,14 +323,9 @@ def grade_single_example(
 
     # 评估每个标准 - 使用并行处理
     from concurrent.futures import ThreadPoolExecutor
-    from tqdm import tqdm
     
     with ThreadPoolExecutor(max_workers=min(len(rubric_items), 128)) as executor:
-        grading_response_list = list(tqdm(
-            executor.map(grade_rubric_item, rubric_items),
-            total=len(rubric_items),
-            desc="评分进度"
-        ))
+        grading_response_list = list(executor.map(grade_rubric_item, rubric_items))
 
     # 计算总分
     overall_score = calculate_score(rubric_items, grading_response_list)

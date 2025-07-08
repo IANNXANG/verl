@@ -128,3 +128,4 @@ outputs
 validation_data/
 rollout_data/
 core.*
+tensorboard_log/

@@ -15,7 +15,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=data/healthbench_train.parquet \
     data.val_files=data/healthbench_val.parquet \
-    data.train_batch_size=256 \
+    data.train_batch_size=128 \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
