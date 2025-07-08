@@ -23,14 +23,22 @@ def make_map_fn(split: str):
         # 提取rubrics
         rubrics = [RubricItem.from_dict(r) for r in example['rubrics']]
         
-        # 构造verl所需的数据格式，只保留四个必要字段
+        # 构造reward_model字段
+        reward_model = {
+            "style": "rubric",
+            "rubrics": [r.to_dict() for r in rubrics],
+            "ground_truth": ""  # 使用空字符串
+        }
+        
+        # 构造verl所需的数据格式
         data = {
             "data_source": "healthbench",
-            "prompt": prompt,  # 已经是正确的格式 [{role, content}, ...]
+            "prompt": prompt,  # 保留外层prompt
             "ability": "medical_chat",
-            "reward_model": {
-                "style": "rubric",
-                "rubrics": [r.to_dict() for r in rubrics]
+            "reward_model": reward_model,  # 保留外层reward_model
+            "extra_info": {
+                "prompt": prompt,  # 在extra_info中也放入prompt
+                "reward_model": reward_model  # 在extra_info中也放入reward_model
             }
         }
         return data
@@ -65,6 +73,8 @@ def main():
     # 加载验证数据
     val_file = os.path.join(args.local_dir, 'healthbench_null.jsonl')
     val_data = load_jsonl(val_file)
+    # 只保留前50笔验证数据
+    val_data = val_data[:50]
     
     # 处理训练集和验证集
     train_dataset = process_dataset(train_data, 'train')

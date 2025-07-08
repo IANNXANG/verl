@@ -20,8 +20,10 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
+    custom_reward_function.path=health_bench/healthbench_reward_fn.py \
+    custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path=${MODEL_PATH} \
-    actor_rollout_ref.actor.optim.lr=5e-6 \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.warmup_style=cosine \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
     actor_rollout_ref.actor.optim.min_lr_ratio=0.1 \
@@ -51,8 +53,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
+    trainer.save_freq=5 \
     trainer.test_freq=5 \
     trainer.rollout_data_dir="./log/rollout_log/${EXPERIMENT_NAME}" \
     trainer.validation_data_dir="./log/validation_log/${EXPERIMENT_NAME}" \
-    trainer.total_epochs=1 $@ 
+    trainer.total_epochs=3 $@ 
