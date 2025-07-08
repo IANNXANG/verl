@@ -19,12 +19,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
-    data.truncation=error \
-    data.reward_fn_key=data_source \
-    data.custom_cls.name=RLHFDataset \
-    data.custom_cls.path=verl.data.rlhf_dataset \
-    custom_reward_function.name=compute_score \
-    custom_reward_function.path=health_bench.healthbench_reward_fn \
+    data.truncation='error' \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=5e-6 \
     actor_rollout_ref.actor.optim.warmup_style=cosine \
