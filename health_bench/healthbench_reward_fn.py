@@ -310,7 +310,9 @@ def grade_single_example(
         messages = [dict(content=grader_prompt, role="user")]
         
         # 调用评分模型
-        while True:
+        retry_count = 0
+        max_retries = 10
+        while retry_count < max_retries:
             sampler_response = grader_model(messages)
             # 从SamplerResponse对象中获取response_text
             grading_response_dict = parse_json_to_dict(sampler_response.response_text)
@@ -319,6 +321,16 @@ def grade_single_example(
                 if label is True or label is False:
                     break
             print("评分失败，JSON输出有误，重试中...")
+            retry_count += 1
+            
+        # 如果重试次数达到上限,返回失败结果
+        if retry_count >= max_retries:
+            print(f"评分失败次数达到上限({max_retries}次),返回失败结果")
+            return {
+                "criteria_met": False,
+                "explanation": "JSON解析失败次数过多"
+            }
+            
         return grading_response_dict
 
     # 评估每个标准 - 使用并行处理
