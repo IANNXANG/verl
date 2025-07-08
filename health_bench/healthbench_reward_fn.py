@@ -399,11 +399,7 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str = None,
         rubric_items = [RubricItem.from_dict(r) for r in rubrics]
         
         # 使用VLLM作为评分模型
-        grader = VLLMSampler(
-            max_tokens=2048,
-            enable_thinking=False,  # 使用no-think模式，快速响应
-            filter_think_tags=True  # 过滤思考标签，确保JSON输出纯净
-        )
+        grader = get_global_grader()  # 使用全局评分器实例
         
         score, _, _ = grade_single_example(prompt, solution_str, rubric_items, grader)
         return score  # 已经是归一化的分数[0,1]
@@ -411,6 +407,80 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str = None,
     except Exception as e:
         print(f"计算奖励分数时出错: {e}")
         return 0.0
+
+def compute_score_batched(data_sources: List[str], solution_strs: List[str], ground_truths: List[str], extra_infos: List[Dict[str, Any]]) -> List[float]:
+    """
+    批量计算多个回答的奖励分数
+    
+    Args:
+        data_sources: 数据集名称列表
+        solution_strs: 模型生成的回答列表
+        ground_truths: 不使用
+        extra_infos: 包含prompt和reward_model信息的列表
+        
+    Returns:
+        List[float]: 奖励分数列表 [0, 1]
+    """
+    batch_data = list(zip(data_sources, solution_strs, ground_truths, extra_infos))
+    return batch_compute_scores(batch_data)
+
+# 全局评分器实例,避免重复创建
+_global_grader = None
+
+def get_global_grader():
+    """获取或创建全局评分器实例"""
+    global _global_grader
+    if _global_grader is None:
+        _global_grader = VLLMSampler(
+            max_tokens=2048,
+            enable_thinking=False,
+            filter_think_tags=True
+        )
+    return _global_grader
+
+def batch_compute_scores(batch_data: List[Tuple[str, str, str, Dict[str, Any]]]) -> List[float]:
+    """
+    批量计算多个回答的奖励分数
+    
+    Args:
+        batch_data: 列表,每项包含(data_source, solution_str, ground_truth, extra_info)
+        
+    Returns:
+        List[float]: 奖励分数列表
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def process_single_item(item):
+        data_source, solution_str, ground_truth, extra_info = item
+        try:
+            if data_source != "healthbench":
+                return 0.0
+                
+            if extra_info is None:
+                return 0.0
+                
+            prompt = extra_info.get("prompt", [])
+            reward_model = extra_info.get("reward_model", {})
+            rubrics = reward_model.get("rubrics", [])
+            
+            if not prompt or not rubrics:
+                return 0.0
+                
+            rubric_items = [RubricItem.from_dict(r) for r in rubrics]
+            grader = get_global_grader()  # 使用全局评分器实例
+            
+            score, _, _ = grade_single_example(prompt, solution_str, rubric_items, grader)
+            return score
+            
+        except Exception as e:
+            print(f"计算奖励分数时出错: {e}")
+            return 0.0
+    
+    # 使用线程池并行处理
+    with ThreadPoolExecutor(max_workers=32) as executor:  # 设置32个并发
+        scores = list(executor.map(process_single_item, batch_data))
+    
+    return scores
 
 if __name__ == "__main__":
     # 示例用法
