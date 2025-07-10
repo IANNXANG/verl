@@ -59,7 +59,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--local_dir', default='health_bench/data_group')
-    parser.add_argument('--output_dir', default='data')
+    parser.add_argument('--output_dir', default='data/health_bench')
     parser.add_argument('--hdfs_dir', default=None)
     
     args = parser.parse_args()
@@ -73,8 +73,8 @@ def main():
     # 加载验证数据
     val_file = os.path.join(args.local_dir, 'healthbench_null.jsonl')
     val_data = load_jsonl(val_file)
-    # 只保留前50笔验证数据
-    val_data = val_data[:50]
+    # 只保留前100笔验证数据“验证集”
+    val_data = val_data[:100]
     
     # 处理训练集和验证集
     train_dataset = process_dataset(train_data, 'train')
