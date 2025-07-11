@@ -545,7 +545,7 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, graded_prompt_info=None):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
@@ -562,6 +562,40 @@ class RayPPOTrainer:
             if len(v) == n:
                 base_data[k] = v
 
+        # 添加分层系统提示词信息
+        if graded_prompt_info is not None and len(graded_prompt_info) == n:
+            # 提取分层系统提示词相关字段
+            rubric_counts = []
+            actual_rubric_counts = []
+            rubric_ratios = []
+            system_prompts = []
+            original_indices = []
+            graded_indices = []
+            
+            for info in graded_prompt_info:
+                if isinstance(info, dict):
+                    rubric_counts.append(info.get("rubric_count", 0))
+                    actual_rubric_counts.append(info.get("actual_rubric_count", 0))
+                    rubric_ratios.append(info.get("rubric_ratio", 0.0))
+                    system_prompts.append(info.get("system_prompt", ""))
+                    original_indices.append(info.get("original_sample_index", -1))
+                    graded_indices.append(info.get("graded_sample_index", -1))
+                else:
+                    # 如果信息格式不正确，填充默认值
+                    rubric_counts.append(0)
+                    actual_rubric_counts.append(0)
+                    rubric_ratios.append(0.0)
+                    system_prompts.append("")
+                    original_indices.append(-1)
+                    graded_indices.append(-1)
+            
+            base_data["rubric_count"] = rubric_counts
+            base_data["actual_rubric_count"] = actual_rubric_counts
+            base_data["rubric_ratio"] = rubric_ratios
+            base_data["system_prompt"] = system_prompts
+            base_data["original_sample_index"] = original_indices
+            base_data["graded_sample_index"] = graded_indices
+
         lines = []
         for i in range(n):
             entry = {k: v[i] for k, v in base_data.items()}
@@ -571,6 +605,16 @@ class RayPPOTrainer:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
+        
+        # 如果有分层系统提示词信息，额外打印统计信息
+        if graded_prompt_info is not None and len(graded_prompt_info) == n:
+            unique_rubric_counts = set(rubric_counts)
+            unique_actual_rubric_counts = set(actual_rubric_counts)
+            unique_ratios = set(rubric_ratios)
+            print(f"  - 分层系统提示词统计: {len(graded_prompt_info)}条记录")
+            print(f"  - 总Rubric数量分布: {sorted(unique_rubric_counts)}")
+            print(f"  - 实际显示Rubric数量分布: {sorted(unique_actual_rubric_counts)}")
+            print(f"  - Ratio分布: {sorted(unique_ratios)}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -719,6 +763,7 @@ class RayPPOTrainer:
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                graded_prompt_info=None,  # 验证阶段通常不使用分层系统提示词
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
@@ -1196,12 +1241,14 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            graded_prompt_info = batch.non_tensor_batch.get("graded_prompt_info", None)
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
+                                graded_prompt_info=graded_prompt_info,
                             )
 
                     # validate

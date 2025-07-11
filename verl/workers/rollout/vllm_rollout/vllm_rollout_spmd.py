@@ -82,17 +82,22 @@ class RubricItem:
             "tags": self.tags
         }
 
-def _generate_rubric_system_message(rubric_items: List[RubricItem], rubric_ratio: float) -> str:
-    """Generate system message with rubric information for open-book evaluation."""
+def _generate_rubric_system_message(rubric_items: List[RubricItem], rubric_ratio: float) -> tuple[str, int]:
+    """Generate system message with rubric information for open-book evaluation.
+    
+    Returns:
+        tuple: (system_message, actual_rubric_count) - 系统提示词和实际显示的rubric数量
+    """
     if not rubric_items:
-        return ""
+        return "", 0
     
     # 如果rubric_ratio < 1.0，随机选择部分criterion
     if rubric_ratio < 1.0:
         total_criteria = len(rubric_items)
         num_to_show = round(total_criteria * rubric_ratio)  # 四舍五入
-        if num_to_show == 0 and total_criteria > 0 and rubric_ratio > 0:
-            num_to_show = 1  # 至少显示一个criterion（但ratio=0时除外）
+        
+        # 🔧 修改：当计算出的rubric数量为0时，不强制显示任何criterion
+        # 移除原来的强制显示逻辑：if num_to_show == 0 and total_criteria > 0 and rubric_ratio > 0: num_to_show = 1
         
         # 随机选择要显示的criterion
         if num_to_show > 0:
@@ -101,6 +106,10 @@ def _generate_rubric_system_message(rubric_items: List[RubricItem], rubric_ratio
             selected_rubric_items = []
     else:
         selected_rubric_items = rubric_items
+    
+    # 🔧 如果没有选择任何rubric，直接返回空字符串和0
+    if not selected_rubric_items:
+        return "", 0
     
     positive_points = []
     negative_points = []
@@ -135,7 +144,7 @@ def _generate_rubric_system_message(rubric_items: List[RubricItem], rubric_ratio
     
     rubric_message += "IMPORTANT: Do not mention or reference these evaluation criteria in your response. Do not indicate that you have seen any scoring rubric or evaluation guidelines. Your response should appear natural and spontaneous. Revealing that you have access to evaluation criteria would be considered cheating and is strictly prohibited."
     
-    return rubric_message
+    return rubric_message, len(selected_rubric_items)
 
 # TODO
 # 1. support pp in vllm
@@ -352,7 +361,6 @@ class vLLMRollout(BaseRollout):
         original_lora_requests = lora_requests.copy() if lora_requests else None
         
         if enable_graded_system_prompt and do_sample and not is_validate and original_n > 1:
-            print(f"[GRADED SYSTEM PROMPT] 启用分层系统提示词功能，n={original_n}")
             
             # 从meta_info中获取rubric信息（额外数据通道）
             rubric_info_available = False
@@ -360,7 +368,6 @@ class vLLMRollout(BaseRollout):
             
             # 优先从meta_info获取reward_model信息
             if 'graded_system_prompt_reward_models' in prompts.meta_info:
-                print(f"[GRADED SYSTEM PROMPT] 成功从meta_info获取rubric数据")
                 reward_models = prompts.meta_info['graded_system_prompt_reward_models']
                 
                 for i in range(batch_size):
@@ -378,8 +385,6 @@ class vLLMRollout(BaseRollout):
             
             # 备用方案：从non_tensor_batch中获取rubric信息
             elif 'reward_model' in non_tensor_batch:
-                print(f"[GRADED SYSTEM PROMPT] 从non_tensor_batch获取rubric数据（备用通道）")
-                
                 for i in range(batch_size):
                     reward_model = non_tensor_batch['reward_model'][i]
                     if isinstance(reward_model, dict) and 'rubrics' in reward_model:
@@ -390,7 +395,8 @@ class vLLMRollout(BaseRollout):
                     else:
                         rubric_items_list.append([])
             else:
-                print(f"[GRADED SYSTEM PROMPT] 未找到rubric数据")
+                # 如果没有找到rubric信息，填充空列表
+                rubric_items_list = [[] for _ in range(batch_size)]
             
             # 如果non_tensor_batch中没有，尝试从其他地方获取
             if not rubric_info_available and hasattr(prompts, 'non_tensor_batch'):
@@ -410,17 +416,19 @@ class vLLMRollout(BaseRollout):
                         else:
                             rubric_items_list.append([])
             
-            if not rubric_info_available:
-                print(f"[GRADED SYSTEM PROMPT] 警告：未找到rubric信息，将使用默认行为")
-                # 如果没有rubric信息，填充空列表
-                rubric_items_list = [[] for _ in range(batch_size)]
-            else:
+            # 简化的启动信息
+            if rubric_info_available:
                 total_rubrics = sum(len(items) for items in rubric_items_list)
-                print(f"[GRADED SYSTEM PROMPT] 成功提取{total_rubrics}个rubric items")
+                print(f"[GRADED SYSTEM PROMPT] 分层系统提示词功能已启用: n={original_n}, 总rubric数={total_rubrics}")
+            else:
+                print(f"[GRADED SYSTEM PROMPT] 分层系统提示词功能已启用: n={original_n}, 未找到rubric信息")
             
             # 生成n个不同比例的system prompt
             expanded_vllm_inputs = []
             expanded_lora_requests = []
+            
+            # 收集分层系统提示词信息用于日志记录
+            graded_prompt_info = []
             
             for i in range(batch_size):
                 rubric_items = rubric_items_list[i]
@@ -435,21 +443,54 @@ class vLLMRollout(BaseRollout):
                     
                     # 生成system prompt
                     if rubric_items and rubric_ratio > 0:
-                        system_message = _generate_rubric_system_message(rubric_items, rubric_ratio)
-                        print(f"[GRADED SYSTEM PROMPT] 样本{i}-{sample_idx}: rubric_ratio={rubric_ratio:.2f}, 系统提示词长度={len(system_message)}")
-                        print(f"[GRADED SYSTEM PROMPT] 系统提示词内容:\n{system_message[:200]}..." if len(system_message) > 200 else f"[GRADED SYSTEM PROMPT] 系统提示词内容:\n{system_message}")
+                        system_message, actual_rubric_count = _generate_rubric_system_message(rubric_items, rubric_ratio)
                         
-                        # 将system message转换为token ids并添加到prompt前面
-                        # 使用tokenizer来编码system message
-                        tokenizer = self.inference_engine.llm_engine.tokenizer
-                        system_tokens = tokenizer.encode(system_message, add_special_tokens=False)
-                        
-                        # 组合system tokens和原始prompt tokens
-                        combined_prompt_ids = system_tokens + original_prompt_ids
-                        print(f"[GRADED SYSTEM PROMPT] 原始prompt长度: {len(original_prompt_ids)}, 系统提示词token长度: {len(system_tokens)}, 组合后长度: {len(combined_prompt_ids)}")
+                        # 🔧 检查生成的系统提示词是否为空（当实际透露的rubric数量为0时）
+                        if system_message:  # 只有当系统提示词不为空时才添加
+                            # 将system message转换为token ids并添加到prompt前面
+                            # 使用tokenizer来编码system message
+                            tokenizer = self.inference_engine.llm_engine.tokenizer
+                            system_tokens = tokenizer.encode(system_message, add_special_tokens=False)
+                            
+                            # 组合system tokens和原始prompt tokens
+                            combined_prompt_ids = system_tokens + original_prompt_ids
+                            
+                            # 收集信息用于日志记录
+                            graded_info = {
+                                "rubric_count": len(rubric_items),  # 总rubric数量
+                                "actual_rubric_count": actual_rubric_count,  # 实际显示的rubric数量
+                                "rubric_ratio": rubric_ratio,
+                                "system_prompt": system_message[:500] + "..." if len(system_message) > 500 else system_message,  # 截断过长的提示词
+                                "original_sample_index": i,
+                                "graded_sample_index": sample_idx
+                            }
+                        else:
+                            # 🔧 当系统提示词为空时，按照无系统提示词处理
+                            combined_prompt_ids = original_prompt_ids
+                            
+                            # 收集信息用于日志记录
+                            graded_info = {
+                                "rubric_count": len(rubric_items),  # 总rubric数量
+                                "actual_rubric_count": actual_rubric_count,  # 实际显示的rubric数量（为0）
+                                "rubric_ratio": rubric_ratio,
+                                "system_prompt": "",
+                                "original_sample_index": i,
+                                "graded_sample_index": sample_idx
+                            }
                     else:
                         combined_prompt_ids = original_prompt_ids
-                        print(f"[GRADED SYSTEM PROMPT] 样本{i}-{sample_idx}: 无系统提示词 (rubric_ratio={rubric_ratio:.2f})")
+                        
+                        # 收集信息用于日志记录
+                        graded_info = {
+                            "rubric_count": len(rubric_items),  # 总rubric数量
+                            "actual_rubric_count": 0,  # 实际显示的rubric数量为0
+                            "rubric_ratio": rubric_ratio,
+                            "system_prompt": "",
+                            "original_sample_index": i,
+                            "graded_sample_index": sample_idx
+                        }
+                    
+                    graded_prompt_info.append(graded_info)
                     
                     # 创建新的vllm input
                     new_input = original_vllm_inputs[i].copy()
@@ -468,8 +509,6 @@ class vLLMRollout(BaseRollout):
             # 修改sampling参数，每个prompt只采样1次
             kwargs_with_n1 = kwargs.copy()
             kwargs_with_n1["n"] = 1
-            
-            print(f"[GRADED SYSTEM PROMPT] 扩展后batch_size: {batch_size}, 每个prompt采样1次")
         else:
             kwargs_with_n1 = kwargs
 
@@ -520,7 +559,6 @@ class vLLMRollout(BaseRollout):
 
             # 如果使用了分层系统提示词，需要恢复原始的prompt信息
             if enable_graded_system_prompt and do_sample and not is_validate and original_n > 1:
-                print(f"[GRADED SYSTEM PROMPT] 恢复原始prompt信息，当前batch_size: {batch_size}")
                 
                 # 重新构建原始的idx, attention_mask, position_ids
                 original_batch_size = len(original_vllm_inputs)
@@ -564,8 +602,6 @@ class vLLMRollout(BaseRollout):
                 attention_mask = restored_attention_mask  # 只是prompt部分的attention_mask
                 position_ids = restored_position_ids
                 
-                print(f"[GRADED SYSTEM PROMPT] 恢复完成，idx shape: {idx.shape}, attention_mask shape: {attention_mask.shape}")
-                
                 # 同时需要重复non_tensor_batch中的数据
                 if "tools_kwargs" in non_tensor_batch.keys():
                     non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], original_n)
@@ -608,6 +644,12 @@ class vLLMRollout(BaseRollout):
         if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
+
+        # 如果使用了分层系统提示词，添加相关信息到non_tensor_batch中供trainer记录
+        if enable_graded_system_prompt and do_sample and not is_validate and original_n > 1:
+            # 将分层系统提示词信息转换为numpy数组
+            graded_prompt_info_array = np.array(graded_prompt_info, dtype=object)
+            non_tensor_batch["graded_prompt_info"] = graded_prompt_info_array
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
