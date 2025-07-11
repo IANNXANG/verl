@@ -631,19 +631,48 @@ class RayPPOTrainer:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
             if "interaction_kwargs" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("interaction_kwargs")
+            
+            # 检查是否启用分层系统提示词功能，验证时也需要保留reward_model字段
+            enable_graded_system_prompt = getattr(self.config.actor_rollout_ref.rollout, 'enable_graded_system_prompt', False)
+            if enable_graded_system_prompt and "reward_model" in test_batch.non_tensor_batch:
+                print(f"[RAY_TRAINER] 验证阶段：分层系统提示词功能已启用，通过meta_info传递reward_model信息")
+                
+                # 提取reward_model信息并放入meta_info作为额外数据通道
+                reward_models = []
+                for i in range(len(test_batch)):
+                    reward_model = test_batch.non_tensor_batch['reward_model'][i]
+                    reward_models.append(reward_model)
+                
+                # 将reward_model信息存储到meta_info中
+                test_gen_meta_info = {
+                    "graded_system_prompt_reward_models": reward_models,
+                    "enable_graded_system_prompt": True
+                }
+                print(f"[RAY_TRAINER] 验证阶段：成功提取{len(reward_models)}个reward_model到meta_info")
+                
+                # reward_model可以从non_tensor_batch中pop掉
+                non_tensor_batch_keys_to_pop.append("reward_model")
+            else:
+                # 如果没有启用分层系统提示词功能，reward_model字段可以被pop掉
+                if "reward_model" in test_batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("reward_model")
+                test_gen_meta_info = {}
+            
             test_gen_batch = test_batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
+            
+            # 将reward_model信息添加到test_gen_batch的meta_info中
+            test_gen_batch.meta_info.update(test_gen_meta_info)
 
-            test_gen_batch.meta_info = {
+            test_gen_batch.meta_info.update({
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
                 "recompute_log_prob": False,
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
-            }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            })
 
             # pad to be divisible by dp_size
             size_divisor = self.actor_rollout_wg.world_size if not self.async_rollout_mode else self.config.actor_rollout_ref.rollout.agent.num_workers
@@ -969,10 +998,40 @@ class RayPPOTrainer:
                     non_tensor_batch_keys_to_pop.append("tools_kwargs")
                 if "interaction_kwargs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("interaction_kwargs")
+                
+                # 检查是否启用分层系统提示词功能，如果启用则保留reward_model字段
+                enable_graded_system_prompt = getattr(self.config.actor_rollout_ref.rollout, 'enable_graded_system_prompt', False)
+                if enable_graded_system_prompt and "reward_model" in batch.non_tensor_batch:
+                    print(f"[RAY_TRAINER] 分层系统提示词功能已启用，通过meta_info传递reward_model信息")
+                    
+                    # 提取reward_model信息并放入meta_info作为额外数据通道
+                    reward_models = []
+                    for i in range(len(batch)):
+                        reward_model = batch.non_tensor_batch['reward_model'][i]
+                        reward_models.append(reward_model)
+                    
+                    # 将reward_model信息存储到meta_info中，作为备用数据通道
+                    gen_batch_meta_info = {
+                        "graded_system_prompt_reward_models": reward_models,
+                        "enable_graded_system_prompt": True
+                    }
+                    print(f"[RAY_TRAINER] 成功提取{len(reward_models)}个reward_model到meta_info")
+                    
+                    # reward_model可以从non_tensor_batch中pop掉，因为我们已经通过meta_info传递
+                    non_tensor_batch_keys_to_pop.append("reward_model")
+                else:
+                    # 如果没有启用分层系统提示词功能，reward_model字段可以被pop掉
+                    if "reward_model" in batch.non_tensor_batch:
+                        non_tensor_batch_keys_to_pop.append("reward_model")
+                    gen_batch_meta_info = {}
+                
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
+                
+                # 将reward_model信息添加到gen_batch的meta_info中
+                gen_batch.meta_info.update(gen_batch_meta_info)
 
                 is_last_step = self.global_steps >= self.total_training_steps
 

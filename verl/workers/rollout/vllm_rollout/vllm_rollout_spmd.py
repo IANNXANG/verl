@@ -31,9 +31,11 @@ import os
 import pickle
 import socket
 import threading
+import random
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any, Dict, List, Union
+from dataclasses import dataclass
 
 import numpy as np
 import ray
@@ -55,6 +57,85 @@ from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+@dataclass
+class RubricItem:
+    criterion: str
+    points: float
+    tags: List[str]
+
+    def __str__(self) -> str:
+        return self.criterion
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RubricItem":
+        return cls(
+            criterion=d["criterion"],
+            points=d["points"],
+            tags=d.get("tags", [])
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "criterion": self.criterion,
+            "points": self.points,
+            "tags": self.tags
+        }
+
+def _generate_rubric_system_message(rubric_items: List[RubricItem], rubric_ratio: float) -> str:
+    """Generate system message with rubric information for open-book evaluation."""
+    if not rubric_items:
+        return ""
+    
+    # 如果rubric_ratio < 1.0，随机选择部分criterion
+    if rubric_ratio < 1.0:
+        total_criteria = len(rubric_items)
+        num_to_show = round(total_criteria * rubric_ratio)  # 四舍五入
+        if num_to_show == 0 and total_criteria > 0 and rubric_ratio > 0:
+            num_to_show = 1  # 至少显示一个criterion（但ratio=0时除外）
+        
+        # 随机选择要显示的criterion
+        if num_to_show > 0:
+            selected_rubric_items = random.sample(rubric_items, num_to_show)
+        else:
+            selected_rubric_items = []
+    else:
+        selected_rubric_items = rubric_items
+    
+    positive_points = []
+    negative_points = []
+    
+    pos_count = 1
+    neg_count = 1
+    
+    for rubric_item in selected_rubric_items:
+        criterion = rubric_item.criterion
+        points = rubric_item.points
+        
+        if points > 0:
+            positive_points.append(f"Criterion {pos_count}: {criterion} (worth {points} points)")
+            pos_count += 1
+        elif points < 0:
+            negative_points.append(f"Criterion {neg_count}: {criterion} (penalty: {abs(points)} points)")
+            neg_count += 1
+    
+    rubric_message = "You are a helpful medical assistant. For this question, please consider the following evaluation criteria:\n\n"
+    
+    if positive_points:
+        rubric_message += "IMPORTANT POINTS TO INCLUDE (you should aim to address these):\n"
+        rubric_message += "\n".join(positive_points)
+        rubric_message += "\n\n"
+    
+    if negative_points:
+        rubric_message += "IMPORTANT POINTS TO AVOID (you should not do these):\n"
+        rubric_message += "\n".join(negative_points)
+        rubric_message += "\n\n"
+    
+    rubric_message += "Please provide a comprehensive and helpful response that addresses the patient's concerns while following the above guidelines.\n\n"
+    
+    rubric_message += "IMPORTANT: Do not mention or reference these evaluation criteria in your response. Do not indicate that you have seen any scoring rubric or evaluation guidelines. Your response should appear natural and spontaneous. Revealing that you have access to evaluation criteria would be considered cheating and is strictly prohibited."
+    
+    return rubric_message
 
 # TODO
 # 1. support pp in vllm
@@ -264,8 +345,136 @@ class vLLMRollout(BaseRollout):
                 lora_int_id = lora_int_ids[0]
                 lora_requests = [LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")] * batch_size
 
+        # 分层系统提示词功能
+        enable_graded_system_prompt = getattr(self.config, 'enable_graded_system_prompt', False)
+        original_n = self.sampling_params.n
+        original_vllm_inputs = vllm_inputs.copy()
+        original_lora_requests = lora_requests.copy() if lora_requests else None
+        
+        if enable_graded_system_prompt and do_sample and not is_validate and original_n > 1:
+            print(f"[GRADED SYSTEM PROMPT] 启用分层系统提示词功能，n={original_n}")
+            
+            # 从meta_info中获取rubric信息（额外数据通道）
+            rubric_info_available = False
+            rubric_items_list = []
+            
+            # 优先从meta_info获取reward_model信息
+            if 'graded_system_prompt_reward_models' in prompts.meta_info:
+                print(f"[GRADED SYSTEM PROMPT] 成功从meta_info获取rubric数据")
+                reward_models = prompts.meta_info['graded_system_prompt_reward_models']
+                
+                for i in range(batch_size):
+                    if i < len(reward_models):
+                        reward_model = reward_models[i]
+                        if isinstance(reward_model, dict) and 'rubrics' in reward_model:
+                            rubrics = reward_model['rubrics']
+                            rubric_items = [RubricItem.from_dict(r) for r in rubrics]
+                            rubric_items_list.append(rubric_items)
+                            rubric_info_available = True
+                        else:
+                            rubric_items_list.append([])
+                    else:
+                        rubric_items_list.append([])
+            
+            # 备用方案：从non_tensor_batch中获取rubric信息
+            elif 'reward_model' in non_tensor_batch:
+                print(f"[GRADED SYSTEM PROMPT] 从non_tensor_batch获取rubric数据（备用通道）")
+                
+                for i in range(batch_size):
+                    reward_model = non_tensor_batch['reward_model'][i]
+                    if isinstance(reward_model, dict) and 'rubrics' in reward_model:
+                        rubrics = reward_model['rubrics']
+                        rubric_items = [RubricItem.from_dict(r) for r in rubrics]
+                        rubric_items_list.append(rubric_items)
+                        rubric_info_available = True
+                    else:
+                        rubric_items_list.append([])
+            else:
+                print(f"[GRADED SYSTEM PROMPT] 未找到rubric数据")
+            
+            # 如果non_tensor_batch中没有，尝试从其他地方获取
+            if not rubric_info_available and hasattr(prompts, 'non_tensor_batch'):
+                # 检查extra_info
+                if 'extra_info' in prompts.non_tensor_batch:
+                    for i in range(batch_size):
+                        extra_info = prompts.non_tensor_batch['extra_info'][i]
+                        if isinstance(extra_info, dict) and 'reward_model' in extra_info:
+                            reward_model = extra_info['reward_model']
+                            if isinstance(reward_model, dict) and 'rubrics' in reward_model:
+                                rubrics = reward_model['rubrics']
+                                rubric_items = [RubricItem.from_dict(r) for r in rubrics]
+                                rubric_items_list.append(rubric_items)
+                                rubric_info_available = True
+                            else:
+                                rubric_items_list.append([])
+                        else:
+                            rubric_items_list.append([])
+            
+            if not rubric_info_available:
+                print(f"[GRADED SYSTEM PROMPT] 警告：未找到rubric信息，将使用默认行为")
+                # 如果没有rubric信息，填充空列表
+                rubric_items_list = [[] for _ in range(batch_size)]
+            else:
+                total_rubrics = sum(len(items) for items in rubric_items_list)
+                print(f"[GRADED SYSTEM PROMPT] 成功提取{total_rubrics}个rubric items")
+            
+            # 生成n个不同比例的system prompt
+            expanded_vllm_inputs = []
+            expanded_lora_requests = []
+            
+            for i in range(batch_size):
+                rubric_items = rubric_items_list[i]
+                original_prompt_ids = original_vllm_inputs[i]["prompt_token_ids"]
+                
+                for sample_idx in range(original_n):
+                    # 计算rubric透露比例：第一次是1，第二次是(n-2)/(n-1)，...，最后一次是0
+                    if original_n == 1:
+                        rubric_ratio = 1.0
+                    else:
+                        rubric_ratio = max(0.0, (original_n - 1 - sample_idx) / (original_n - 1))
+                    
+                    # 生成system prompt
+                    if rubric_items and rubric_ratio > 0:
+                        system_message = _generate_rubric_system_message(rubric_items, rubric_ratio)
+                        print(f"[GRADED SYSTEM PROMPT] 样本{i}-{sample_idx}: rubric_ratio={rubric_ratio:.2f}, 系统提示词长度={len(system_message)}")
+                        print(f"[GRADED SYSTEM PROMPT] 系统提示词内容:\n{system_message[:200]}..." if len(system_message) > 200 else f"[GRADED SYSTEM PROMPT] 系统提示词内容:\n{system_message}")
+                        
+                        # 将system message转换为token ids并添加到prompt前面
+                        # 使用tokenizer来编码system message
+                        tokenizer = self.inference_engine.llm_engine.tokenizer
+                        system_tokens = tokenizer.encode(system_message, add_special_tokens=False)
+                        
+                        # 组合system tokens和原始prompt tokens
+                        combined_prompt_ids = system_tokens + original_prompt_ids
+                        print(f"[GRADED SYSTEM PROMPT] 原始prompt长度: {len(original_prompt_ids)}, 系统提示词token长度: {len(system_tokens)}, 组合后长度: {len(combined_prompt_ids)}")
+                    else:
+                        combined_prompt_ids = original_prompt_ids
+                        print(f"[GRADED SYSTEM PROMPT] 样本{i}-{sample_idx}: 无系统提示词 (rubric_ratio={rubric_ratio:.2f})")
+                    
+                    # 创建新的vllm input
+                    new_input = original_vllm_inputs[i].copy()
+                    new_input["prompt_token_ids"] = combined_prompt_ids
+                    expanded_vllm_inputs.append(new_input)
+                    
+                    # 添加对应的lora request
+                    if original_lora_requests:
+                        expanded_lora_requests.append(original_lora_requests[i])
+            
+            # 更新参数
+            vllm_inputs = expanded_vllm_inputs
+            lora_requests = expanded_lora_requests if expanded_lora_requests else None
+            batch_size = len(vllm_inputs)  # 新的batch size = 原batch_size * n
+            
+            # 修改sampling参数，每个prompt只采样1次
+            kwargs_with_n1 = kwargs.copy()
+            kwargs_with_n1["n"] = 1
+            
+            print(f"[GRADED SYSTEM PROMPT] 扩展后batch_size: {batch_size}, 每个prompt采样1次")
+        else:
+            kwargs_with_n1 = kwargs
+
         # users can customize different sampling_params at different run
-        with self.update_sampling_params(**kwargs):
+        with self.update_sampling_params(**kwargs_with_n1):
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
@@ -305,6 +514,68 @@ class vLLMRollout(BaseRollout):
                     non_tensor_batch["interaction_kwargs"] = _repeat_interleave(non_tensor_batch["interaction_kwargs"], self.sampling_params.n)
                 if "raw_prompt" in non_tensor_batch.keys():
                     non_tensor_batch["raw_prompt"] = _repeat_interleave(non_tensor_batch["raw_prompt"], self.sampling_params.n)
+                # 处理reward_model字段
+                if "reward_model" in non_tensor_batch.keys():
+                    non_tensor_batch["reward_model"] = _repeat_interleave(non_tensor_batch["reward_model"], self.sampling_params.n)
+
+            # 如果使用了分层系统提示词，需要恢复原始的prompt信息
+            if enable_graded_system_prompt and do_sample and not is_validate and original_n > 1:
+                print(f"[GRADED SYSTEM PROMPT] 恢复原始prompt信息，当前batch_size: {batch_size}")
+                
+                # 重新构建原始的idx, attention_mask, position_ids
+                original_batch_size = len(original_vllm_inputs)
+                
+                # 恢复原始的prompt token ids
+                restored_prompts = []
+                for i in range(original_batch_size):
+                    original_prompt_ids = original_vllm_inputs[i]["prompt_token_ids"]
+                    # 重复n次
+                    for _ in range(original_n):
+                        restored_prompts.append(original_prompt_ids)
+                
+                # 注意：这里需要使用与当前idx相同的max_len来确保尺寸一致
+                current_max_len = idx.shape[1]  # 使用当前batch中已有的最大长度
+                restored_idx = []
+                restored_attention_mask = []
+                
+                for prompt_ids in restored_prompts:
+                    # 左padding到current_max_len长度
+                    if len(prompt_ids) > current_max_len:
+                        # 如果原始prompt比当前长度还长，进行截断（左截断保留最后的tokens）
+                        padded_ids = prompt_ids[-current_max_len:]
+                        attention = [1] * current_max_len
+                    else:
+                        # 左padding
+                        padding_length = current_max_len - len(prompt_ids)
+                        padded_ids = [self.pad_token_id] * padding_length + prompt_ids
+                        attention = [0] * padding_length + [1] * len(prompt_ids)
+                    
+                    restored_idx.append(padded_ids)
+                    restored_attention_mask.append(attention)
+                
+                restored_idx = torch.tensor(restored_idx, device=idx.device)
+                restored_attention_mask = torch.tensor(restored_attention_mask, device=attention_mask.device)
+                
+                # 重新计算position_ids
+                restored_position_ids = (restored_attention_mask.cumsum(dim=1) - 1) * restored_attention_mask
+                
+                # 更新idx, attention_mask, position_ids为原始值
+                idx = restored_idx
+                attention_mask = restored_attention_mask  # 只是prompt部分的attention_mask
+                position_ids = restored_position_ids
+                
+                print(f"[GRADED SYSTEM PROMPT] 恢复完成，idx shape: {idx.shape}, attention_mask shape: {attention_mask.shape}")
+                
+                # 同时需要重复non_tensor_batch中的数据
+                if "tools_kwargs" in non_tensor_batch.keys():
+                    non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], original_n)
+                if "interaction_kwargs" in non_tensor_batch.keys():
+                    non_tensor_batch["interaction_kwargs"] = _repeat_interleave(non_tensor_batch["interaction_kwargs"], original_n)
+                if "raw_prompt" in non_tensor_batch.keys():
+                    non_tensor_batch["raw_prompt"] = _repeat_interleave(non_tensor_batch["raw_prompt"], original_n)
+                # 处理reward_model字段 - 这是修复关键！
+                if "reward_model" in non_tensor_batch.keys():
+                    non_tensor_batch["reward_model"] = _repeat_interleave(non_tensor_batch["reward_model"], original_n)
 
             seq = torch.cat([idx, response], dim=-1)
 

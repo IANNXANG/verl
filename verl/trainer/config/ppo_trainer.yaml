@@ -558,6 +558,9 @@ actor_rollout_ref:
     # support logging rollout prob for debugging purpose
     calculate_log_probs: False
 
+    # 启用分层系统提示词功能(仅在rollout阶段生效，不参与训练)
+    enable_graded_system_prompt: False
+
     # profiler configs
     profiler:
 
